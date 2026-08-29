@@ -2,14 +2,27 @@
 // Milestone 1 — Netlify serverless bridge
 // Gemini API (parse item attributes) + SerpApi Google Shopping (brand thumbnail)
 //
-// Runtime: Node 18+ on Netlify. `fetch` is a built-in global here,
-// so node-fetch is NOT required (and must not be used).
+// Runtime: Node 18+ on Netlify. `fetch` is a built-in global here.
+//
+// Accepts:
+//   POST { "query": "Doritos" }            <- used by the widget
+//   GET  ?query=Doritos                     <- convenient for browser testing
+
+const fetchWithTimeout = async (url, options = {}, timeoutMs = 15000) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 exports.handler = async (event) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Content-Type': 'application/json'
   };
 
@@ -18,20 +31,29 @@ exports.handler = async (event) => {
     return { statusCode: 200, headers, body: '' };
   }
 
-  if (event.httpMethod !== 'POST') {
+  // Allow both GET (browser testing) and POST (the widget)
+  if (event.httpMethod !== 'GET' && event.httpMethod !== 'POST') {
     return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method Not Allowed' }) };
   }
 
   try {
-    const { query } = JSON.parse(event.body || '{}');
+    // Read the query from the URL (GET) or the JSON body (POST)
+    let query;
+    if (event.httpMethod === 'GET') {
+      query = event.queryStringParameters && event.queryStringParameters.query;
+    } else {
+      query = JSON.parse(event.body || '{}').query;
+    }
 
     if (!query || !query.trim()) {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'Query parameter is required' }) };
     }
 
-    // Fail fast with a clear message if the key is missing.
-    // (Missing env vars are the #1 cause of confusing 500 errors.)
-    if (!process.env.GEMINI_API_KEY) {
+    // .trim() guards against a stray space/newline pasted into the env var.
+    const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
+    const serpKey = (process.env.SERPAPI_KEY || '').trim();
+
+    if (!geminiKey) {
       return {
         statusCode: 500,
         headers,
@@ -39,7 +61,7 @@ exports.handler = async (event) => {
       };
     }
 
-    // ── STEP 1: Gemini — structural analysis, brand detection & price estimation ──
+    // -- STEP 1: Gemini — structural analysis, brand detection & price estimation --
     const geminiSystemPrompt = `
 You are a grocery item parser for a professional delivery service.
 Analyze query: "${query}".
@@ -71,8 +93,8 @@ Rules:
 - Output ONLY raw JSON. No markdown fences.
 `;
 
-    const geminiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    const geminiRes = await fetchWithTimeout(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -80,12 +102,12 @@ Rules:
           contents: [{ parts: [{ text: geminiSystemPrompt }] }],
           generationConfig: { responseMimeType: 'application/json' }
         })
-      }
+      },
+      20000 // 20s cap for Gemini
     );
 
     const geminiData = await geminiRes.json();
 
-    // Guard: Gemini can return no candidates (API error, safety block, quota exceeded)
     if (!geminiData.candidates || geminiData.candidates.length === 0) {
       return {
         statusCode: 502,
@@ -98,7 +120,6 @@ Rules:
     try {
       parsed = JSON.parse(geminiData.candidates[0].content.parts[0].text);
     } catch (parseErr) {
-      // Gemini occasionally wraps JSON in markdown fences despite instructions.
       return {
         statusCode: 502,
         headers,
@@ -109,23 +130,25 @@ Rules:
       };
     }
 
-    // ── STEP 2: SerpApi Google Shopping — exact brand-matched thumbnail ──
+    // -- STEP 2: SerpApi Google Shopping — exact brand-matched thumbnail --
     let imageUrl = null;
-    if (process.env.SERPAPI_KEY) {
+    if (serpKey) {
       try {
         const searchQuery = encodeURIComponent(parsed.exactProductTitle || query);
-        // gl=us & hl=en → US Google Shopping locale returns reliable retail thumbnails
-        const serpRes = await fetch(
-          `https://serpapi.com/search.json?engine=google_shopping&q=${searchQuery}&num=3&gl=us&hl=en&api_key=${process.env.SERPAPI_KEY}`
+        const serpRes = await fetchWithTimeout(
+          `https://serpapi.com/search.json?engine=google_shopping&q=${searchQuery}&num=3&gl=us&hl=en&api_key=${serpKey}`,
+          {},
+          9000 // 9s cap for SerpApi
         );
         const serpData = await serpRes.json();
 
         if (serpData.shopping_results && serpData.shopping_results.length > 0) {
           imageUrl = serpData.shopping_results[0].thumbnail;
+        } else if (serpData.error) {
+          console.error('SerpApi returned an error:', serpData.error);
         }
       } catch (serpErr) {
-        // Thumbnail is non-critical — log and continue so the card still renders.
-        console.error('SerpApi Google Shopping Error:', serpErr);
+        console.error('SerpApi Google Shopping Error:', serpErr.name, serpErr.message);
       }
     }
 
