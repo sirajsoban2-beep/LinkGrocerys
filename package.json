@@ -1,0 +1,6 @@
+{
+  "name": "grocery-widget",
+  "version": "1.0.0",
+  "description": "Netlify serverless bridge for grocery search widget (Gemini + SerpApi)",
+  "private": true
+}
