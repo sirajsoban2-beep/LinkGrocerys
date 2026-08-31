@@ -1,6 +1,9 @@
 {
   "name": "grocery-widget",
   "version": "1.0.0",
-  "description": "Netlify serverless bridge for grocery search widget (Gemini + SerpApi)",
-  "private": true
+  "description": "Netlify serverless bridge for grocery search widget (Gemini + SerpApi + Blobs cache)",
+  "private": true,
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
 }
