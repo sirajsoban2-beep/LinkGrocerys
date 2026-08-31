@@ -90,11 +90,18 @@ exports.handler = async (event) => {
 You are a grocery item parser for a professional delivery service.
 Analyze query: "${query}".
 
-The query may be a BRANDED item (e.g. "Doritos", "Jif peanut butter") or a
-GENERIC/unbranded item with no brand at all (e.g. "bananas", "tomato soup",
-"granola bars", "milk", "eggs"). Generic items are completely normal and
-common — always return a full, valid result for them. Do not treat the
-absence of a brand as an error.
+The query may be:
+- A BRANDED item with a specific product (e.g. "Doritos", "Jif peanut butter")
+- A GENERIC/unbranded item with no brand at all (e.g. "bananas", "tomato soup",
+  "granola bars", "milk", "eggs")
+- Just a BRAND NAME on its own, with no product type mentioned (e.g. "Van Decamp",
+  "Doritos" with nothing else, "Barilla"). This is normal — when this happens,
+  pick that brand's single most common, best-known flagship product and return
+  a full result for that product (e.g. "Van Decamp" alone -> treat it as "Van de
+  Kamp's Fish Sticks", their signature product).
+
+All three cases are completely normal and common — always return a full, valid
+result. Never treat a missing product type, or a missing brand, as an error.
 
 Return ONLY a raw JSON object with this exact structure:
 {
@@ -118,44 +125,78 @@ Return ONLY a raw JSON object with this exact structure:
 
 Rules:
 - FUZZY BRAND MATCHING: If the brand looks misspelled or is a close variant of a real major brand (e.g. "Van Decamp" -> "Van de Kamp's", "Cheeze It" -> "Cheez-It", "Barila" -> "Barilla"), silently correct it to the closest well-known brand and use the corrected brand in brandName and exactProductTitle. Record the user's original text in correctedFrom. Never fail on a misspelling if a plausible major brand exists.
+- BARE BRAND NAME: If the query is only a brand name with no product type given, do NOT ask for clarification and do NOT fail — pick that brand's most iconic/common product yourself and return a complete result for it, exactly as if the user had typed the full product name.
 - For GENERIC items with no brand, still return a complete, realistic result — never return an error or empty fields just because there's no brand.
 - Always provide a realistic estimatedPriceRange, even for generic produce/pantry items, based on typical US supermarket pricing.
 - Output ONLY raw JSON. No markdown fences, no commentary.
 `;
 
-    const geminiRes = await fetchWithTimeout(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: geminiSystemPrompt }] }],
-          generationConfig: { responseMimeType: 'application/json' }
-        })
-      },
-      20000
-    );
+    // Runs one Gemini call + JSON parse attempt. Returns the parsed object,
+    // or null if anything about that attempt failed (bad HTTP status, empty
+    // candidates, or unparsable text) — the caller decides whether to retry.
+    async function tryGeminiOnce(promptText) {
+      const res = await fetchWithTimeout(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: promptText }] }],
+            generationConfig: { responseMimeType: 'application/json' }
+          })
+        },
+        20000
+      );
 
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text().catch(() => '');
-      console.error('Gemini HTTP error:', geminiRes.status, errText);
-      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Gemini request failed', status: geminiRes.status }) };
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        console.error('Gemini HTTP error:', res.status, errText);
+        return null;
+      }
+
+      const data = await res.json();
+
+      if (!data.candidates || data.candidates.length === 0) {
+        console.error('Gemini returned no candidates for query:', query, JSON.stringify(data));
+        return null;
+      }
+
+      try {
+        return JSON.parse(data.candidates[0].content.parts[0].text);
+      } catch (parseErr) {
+        console.error('Failed to parse Gemini JSON for query:', query, 'Raw text:', data.candidates[0].content.parts[0].text);
+        return null;
+      }
     }
 
-    const geminiData = await geminiRes.json();
+    // Attempt 1: normal prompt. Attempt 2 (only if attempt 1 fails): a
+    // stricter, more insistent retry — this quietly absorbs the rare bad
+    // response instead of surfacing a technical error to the shopper.
+    let parsed = await tryGeminiOnce(geminiSystemPrompt);
 
-    if (!geminiData.candidates || geminiData.candidates.length === 0) {
-      console.error('Gemini returned no candidates for query:', query, JSON.stringify(geminiData));
-      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Gemini returned no result' }) };
+    if (!parsed) {
+      const retryPrompt = geminiSystemPrompt + '\n\nIMPORTANT: Your previous attempt did not return valid, complete JSON for this query. This query is answerable — if it is a bare brand name, pick that brand\'s flagship product; if it is unbranded/generic, treat it as a normal grocery item. Return ONLY the raw JSON object described above, fully filled in, with no markdown fences and no extra text.';
+      parsed = await tryGeminiOnce(retryPrompt);
     }
 
-    let parsed;
-    try {
-      parsed = JSON.parse(geminiData.candidates[0].content.parts[0].text);
-    } catch (parseErr) {
-      // Log the raw text so we can see EXACTLY why a query like "bananas" failed.
-      console.error('Failed to parse Gemini JSON for query:', query, 'Raw text:', geminiData.candidates[0].content.parts[0].text);
-      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Failed to parse Gemini JSON' }) };
+    if (!parsed) {
+      // Both attempts failed — respond with a friendly, shopper-facing
+      // fallback instead of a raw error, so the UI never shows a dead end.
+      parsed = {
+        originalQuery: query,
+        brandName: null,
+        correctedFrom: null,
+        exactProductTitle: query,
+        category: 'Pantry',
+        isVague: true,
+        clarifyingQuestion: 'WE COULDN\'T PIN DOWN AN EXACT MATCH \u2014 TRY ADDING A BRAND, SIZE, OR PRODUCT TYPE.',
+        detectedQuantity: null,
+        detectedSize: null,
+        defaultSmallestSize: '',
+        suggestedSizes: [],
+        suggestedVarieties: [],
+        estimatedPriceRange: { low: null, high: null, defaultSizePrice: null, formattedDisplay: 'Price not available yet' }
+      };
     }
 
     // ---- 3) SerpApi thumbnail (non-critical) ----
