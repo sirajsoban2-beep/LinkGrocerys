@@ -133,38 +133,48 @@ Rules:
 
     // Runs one Gemini call + JSON parse attempt. Returns the parsed object,
     // or null if anything about that attempt failed (bad HTTP status, empty
-    // candidates, or unparsable text).
+    // candidates, unparsable text, timeout, or network error). Wrapped in
+    // try/catch so a slow/cold-start call that hits the timeout is caught
+    // here and turned into a graceful fallback instead of crashing the
+    // whole request with a raw 500 — this was the cause of intermittent
+    // "Couldn't load that item" on the first search of a cold function.
     async function tryGeminiOnce(promptText, timeoutMs) {
-      const res = await fetchWithTimeout(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: promptText }] }],
-            generationConfig: { responseMimeType: 'application/json' }
-          })
-        },
-        timeoutMs
-      );
-
-      if (!res.ok) {
-        const errText = await res.text().catch(() => '');
-        console.error('Gemini HTTP error:', res.status, errText);
-        return null;
-      }
-
-      const data = await res.json();
-
-      if (!data.candidates || data.candidates.length === 0) {
-        console.error('Gemini returned no candidates for query:', query, JSON.stringify(data));
-        return null;
-      }
-
       try {
-        return JSON.parse(data.candidates[0].content.parts[0].text);
-      } catch (parseErr) {
-        console.error('Failed to parse Gemini JSON for query:', query, 'Raw text:', data.candidates[0].content.parts[0].text);
+        const res = await fetchWithTimeout(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: promptText }] }],
+              generationConfig: { responseMimeType: 'application/json' }
+            })
+          },
+          timeoutMs
+        );
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => '');
+          console.error('Gemini HTTP error:', res.status, errText);
+          return null;
+        }
+
+        const data = await res.json();
+
+        if (!data.candidates || data.candidates.length === 0) {
+          console.error('Gemini returned no candidates for query:', query, JSON.stringify(data));
+          return null;
+        }
+
+        try {
+          return JSON.parse(data.candidates[0].content.parts[0].text);
+        } catch (parseErr) {
+          console.error('Failed to parse Gemini JSON for query:', query, 'Raw text:', data.candidates[0].content.parts[0].text);
+          return null;
+        }
+      } catch (netErr) {
+        // Covers timeout aborts and any other network-level failure.
+        console.error('Gemini request failed (timeout or network) for query:', query, netErr.name, netErr.message);
         return null;
       }
     }
@@ -204,7 +214,7 @@ Rules:
     // timing out at ~24s. One fast attempt plus an instant friendly
     // fallback keeps every response well under Netlify's function limit.
     const [geminiResult, imageUrlFromParallelCall] = await Promise.all([
-      tryGeminiOnce(geminiSystemPrompt, 9000),
+      tryGeminiOnce(geminiSystemPrompt, 14000),
       fetchImage(query)
     ]);
 
@@ -233,7 +243,12 @@ Rules:
     var payload = Object.assign({}, parsed, { imageUrl: imageUrlFromParallelCall });
 
     // ---- 4) Save to cache (best-effort) ----
-    if (store) {
+    // Only cache a REAL Gemini result. If Gemini failed and we're serving
+    // the friendly fallback, we deliberately do NOT cache it — otherwise
+    // one bad/slow attempt would lock that item into a failed result for
+    // the full 7-day TTL, even after Gemini would have succeeded on a
+    // later try.
+    if (store && geminiResult) {
       try { await store.setJSON(key, { cachedAt: Date.now(), payload: payload }); }
       catch (e) { /* cache write failure is non-fatal */ }
     }
@@ -241,7 +256,30 @@ Rules:
     return { statusCode: 200, headers, body: JSON.stringify(Object.assign({}, payload, { cached: false })) };
 
   } catch (err) {
+    // Last-resort safety net: whatever went wrong, the shopper should
+    // never see a raw technical error. Log it for debugging, but respond
+    // with the same friendly fallback card used for a Gemini failure —
+    // statusCode 200 so the frontend renders it as a normal (just vague)
+    // result instead of the red "Couldn't load" message.
     console.error('Unhandled error in grocery-search:', err);
-    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+    var safeQuery = (typeof query === 'string' && query) ? query : 'that item';
+    var fallbackPayload = {
+      originalQuery: safeQuery,
+      brandName: null,
+      correctedFrom: null,
+      exactProductTitle: safeQuery,
+      category: 'Pantry',
+      isVague: true,
+      clarifyingQuestion: 'WE COULDN\'T PIN DOWN AN EXACT MATCH \u2014 TRY ADDING A BRAND, SIZE, OR PRODUCT TYPE.',
+      detectedQuantity: null,
+      detectedSize: null,
+      defaultSmallestSize: '',
+      suggestedSizes: [],
+      suggestedVarieties: [],
+      estimatedPriceRange: { low: null, high: null, defaultSizePrice: null, formattedDisplay: 'Price not available yet' },
+      imageUrl: null,
+      cached: false
+    };
+    return { statusCode: 200, headers, body: JSON.stringify(fallbackPayload) };
   }
 };
