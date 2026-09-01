@@ -133,8 +133,8 @@ Rules:
 
     // Runs one Gemini call + JSON parse attempt. Returns the parsed object,
     // or null if anything about that attempt failed (bad HTTP status, empty
-    // candidates, or unparsable text) — the caller decides whether to retry.
-    async function tryGeminiOnce(promptText) {
+    // candidates, or unparsable text).
+    async function tryGeminiOnce(promptText, timeoutMs) {
       const res = await fetchWithTimeout(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`,
         {
@@ -145,7 +145,7 @@ Rules:
             generationConfig: { responseMimeType: 'application/json' }
           })
         },
-        20000
+        timeoutMs
       );
 
       if (!res.ok) {
@@ -169,19 +169,50 @@ Rules:
       }
     }
 
-    // Attempt 1: normal prompt. Attempt 2 (only if attempt 1 fails): a
-    // stricter, more insistent retry — this quietly absorbs the rare bad
-    // response instead of surfacing a technical error to the shopper.
-    let parsed = await tryGeminiOnce(geminiSystemPrompt);
-
-    if (!parsed) {
-      const retryPrompt = geminiSystemPrompt + '\n\nIMPORTANT: Your previous attempt did not return valid, complete JSON for this query. This query is answerable — if it is a bare brand name, pick that brand\'s flagship product; if it is unbranded/generic, treat it as a normal grocery item. Return ONLY the raw JSON object described above, fully filled in, with no markdown fences and no extra text.';
-      parsed = await tryGeminiOnce(retryPrompt);
+    // ---- 3) SerpApi thumbnail (non-critical) ----
+    // Fired in PARALLEL with Gemini below (not after it) using the raw
+    // query — this used to wait for Gemini's exactProductTitle first,
+    // which stacked both API calls back to back and was the main cause
+    // of slow/timing-out fresh searches. Running them side by side roughly
+    // halves total wait time. Trade-off: the image search uses the user's
+    // raw text instead of Gemini's cleaned-up title, so a corrected brand
+    // (e.g. "Van Decamp" -> "Van de Kamp's") may occasionally get a
+    // slightly less precise photo — an acceptable trade for reliability.
+    async function fetchImage(rawQuery) {
+      if (!serpKey) return null;
+      try {
+        const searchQuery = encodeURIComponent(rawQuery);
+        const serpRes = await fetchWithTimeout(
+          `https://serpapi.com/search.json?engine=google_shopping&q=${searchQuery}&num=3&gl=us&hl=en&api_key=${serpKey}`,
+          {}, 6000
+        );
+        const serpData = await serpRes.json();
+        if (serpData.shopping_results && serpData.shopping_results.length > 0) {
+          return serpData.shopping_results[0].thumbnail;
+        }
+        if (serpData.error) console.error('SerpApi returned an error:', serpData.error);
+        return null;
+      } catch (serpErr) {
+        console.error('SerpApi Google Shopping Error:', serpErr.name, serpErr.message);
+        return null;
+      }
     }
 
+    // Gemini gets a single attempt with a tight timeout — no automatic
+    // retry. A retry that repeats the full ~10s call was doubling
+    // worst-case latency and was the main reason fresh searches were
+    // timing out at ~24s. One fast attempt plus an instant friendly
+    // fallback keeps every response well under Netlify's function limit.
+    const [geminiResult, imageUrlFromParallelCall] = await Promise.all([
+      tryGeminiOnce(geminiSystemPrompt, 9000),
+      fetchImage(query)
+    ]);
+
+    let parsed = geminiResult;
+
     if (!parsed) {
-      // Both attempts failed — respond with a friendly, shopper-facing
-      // fallback instead of a raw error, so the UI never shows a dead end.
+      // Gemini failed — respond with a friendly, shopper-facing fallback
+      // instead of a raw error, so the UI never shows a dead end.
       parsed = {
         originalQuery: query,
         brandName: null,
@@ -199,27 +230,7 @@ Rules:
       };
     }
 
-    // ---- 3) SerpApi thumbnail (non-critical) ----
-    let imageUrl = null;
-    if (serpKey) {
-      try {
-        const searchQuery = encodeURIComponent(parsed.exactProductTitle || query);
-        const serpRes = await fetchWithTimeout(
-          `https://serpapi.com/search.json?engine=google_shopping&q=${searchQuery}&num=3&gl=us&hl=en&api_key=${serpKey}`,
-          {}, 9000
-        );
-        const serpData = await serpRes.json();
-        if (serpData.shopping_results && serpData.shopping_results.length > 0) {
-          imageUrl = serpData.shopping_results[0].thumbnail;
-        } else if (serpData.error) {
-          console.error('SerpApi returned an error:', serpData.error);
-        }
-      } catch (serpErr) {
-        console.error('SerpApi Google Shopping Error:', serpErr.name, serpErr.message);
-      }
-    }
-
-    var payload = Object.assign({}, parsed, { imageUrl: imageUrl });
+    var payload = Object.assign({}, parsed, { imageUrl: imageUrlFromParallelCall });
 
     // ---- 4) Save to cache (best-effort) ----
     if (store) {
