@@ -222,7 +222,10 @@ Rules:
 
     if (!parsed) {
       // Gemini failed — respond with a friendly, shopper-facing fallback
-      // instead of a raw error, so the UI never shows a dead end.
+      // instead of a raw error, so the UI never shows a dead end. Generic
+      // size/variety chips are included (rather than empty arrays) so the
+      // card still gives the shopper something to pick from instead of
+      // showing "Standard retail sizes apply" with nothing to tap.
       parsed = {
         originalQuery: query,
         brandName: null,
@@ -233,9 +236,9 @@ Rules:
         clarifyingQuestion: 'WE COULDN\'T PIN DOWN AN EXACT MATCH \u2014 TRY ADDING A BRAND, SIZE, OR PRODUCT TYPE.',
         detectedQuantity: null,
         detectedSize: null,
-        defaultSmallestSize: '',
-        suggestedSizes: [],
-        suggestedVarieties: [],
+        defaultSmallestSize: '16 oz',
+        suggestedSizes: ['8 oz', '16 oz', '32 oz'],
+        suggestedVarieties: ['Original', 'Value size'],
         estimatedPriceRange: { low: null, high: null, defaultSizePrice: null, formattedDisplay: 'Price not available yet' }
       };
     }
@@ -273,9 +276,9 @@ Rules:
       clarifyingQuestion: 'WE COULDN\'T PIN DOWN AN EXACT MATCH \u2014 TRY ADDING A BRAND, SIZE, OR PRODUCT TYPE.',
       detectedQuantity: null,
       detectedSize: null,
-      defaultSmallestSize: '',
-      suggestedSizes: [],
-      suggestedVarieties: [],
+      defaultSmallestSize: '16 oz',
+      suggestedSizes: ['8 oz', '16 oz', '32 oz'],
+      suggestedVarieties: ['Original', 'Value size'],
       estimatedPriceRange: { low: null, high: null, defaultSizePrice: null, formattedDisplay: 'Price not available yet' },
       imageUrl: null,
       cached: false
