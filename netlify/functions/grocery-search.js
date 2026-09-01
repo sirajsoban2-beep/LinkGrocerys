@@ -83,40 +83,77 @@ exports.handler = async (event) => {
     }
 
     // ---- 2) Gemini: parse + fuzzy brand correction ----
-    // Explicitly covers generic/unbranded items (produce, bakery, etc. —
-    // "bananas", "tomato soup") since brandName is null for these and the
-    // model needs to know that's expected, not an error case.
+    // This prompt encodes category-level RULES rather than a static
+    // database of brands — Gemini applies the same logic dynamically to
+    // any brand or item it sees, instead of us maintaining a lookup table.
     const geminiSystemPrompt = `
 You are a grocery item parser for a professional delivery service.
 Analyze query: "${query}".
 
-The query may be:
-- A BRANDED item with a specific product (e.g. "Doritos", "Jif peanut butter")
-- A GENERIC/unbranded item with no brand at all (e.g. "bananas", "tomato soup",
-  "granola bars", "milk", "eggs")
-- Just a BRAND NAME on its own, with no product type mentioned (e.g. "Van Decamp",
-  "Doritos" with nothing else, "Barilla"). This is normal — when this happens,
-  pick that brand's single most common, best-known flagship product and return
-  a full result for that product (e.g. "Van Decamp" alone -> treat it as "Van de
-  Kamp's Fish Sticks", their signature product).
+CATEGORY FRAMEWORK — apply the rule for whichever category the query falls into:
 
-All three cases are completely normal and common — always return a full, valid
-result. Never treat a missing product type, or a missing brand, as an error.
+1. BRAND & PROPRIETARY NAMES (e.g. "Old Dutch", "Ore-Ida", "Kraft", "Doritos"):
+   Dynamically identify the brand and pick its single most iconic product,
+   drawing on your knowledge of that brand's real product line (top
+   4-6 signature products/flavors exist for most brands — pick the best-known
+   one, or reflect a couple of its known varieties in suggestedVarieties).
+   This includes STORE-BRAND / PRIVATE LABEL names (e.g. "Good & Gather",
+   "Great Value", "Kirkland", "365", "Simple Truth") — treat these exactly
+   like any national brand, with their own typical product variants.
+
+2. FRESH PRODUCE, MEAT & SEAFOOD (e.g. "Asparagus", "Gala Apples", "Ribeye",
+   "Salmon fillet"): brandName is null. Use realistic per-unit pricing and
+   the correct natural unit (see UNIT OF MEASURE below). isVague should
+   usually be false — assume a standard cut/size unless the query is
+   unusually ambiguous.
+
+3. STANDARD PACKAGED GOODS & PANTRY STAPLES (e.g. "Canned Black Beans",
+   "Olive Oil", "Pasta"): default to the standard container size for that
+   product category and a realistic price for it.
+
+4. GENERIC / VAGUE INPUTS (e.g. "Milk", "Chips", "Bread" with no other
+   detail): set isVague to true and use suggestedVarieties to offer the
+   real structural subtypes shoppers actually choose between — e.g. for
+   "Milk": "Whole", "2%", "1%", "Skim", "Almond", "Oat"; for "Bread":
+   "White", "Wheat", "Sourdough", "Multigrain". Do not just guess one
+   subtype silently — surface the choice via suggestedVarieties AND set
+   clarifyingQuestion.
+
+DIETARY & LIFESTYLE TAGS: If the query includes a dietary/lifestyle
+qualifier — "Gluten-Free", "Vegan", "Dairy-Free", "Keto", "Organic", "Sugar-
+Free", etc. — that qualifier is the whole point of the search. Keep it
+front and center in exactProductTitle and reflect it in
+suggestedVarieties/dietaryTags. NEVER silently strip the qualifier and
+return the generic version (e.g. "Gluten-Free Bread" must return an actual
+gluten-free bread result, not regular wheat bread; "Vegan Cheese" must
+return a plant-based cheese result, not dairy cheese).
+
+UNIT OF MEASURE & SIZE LOGIC: Produce should default to the unit a shopper
+actually thinks in — "1 lb", "1 bunch", "1 head", "each" — not a generic
+count. Packaged/pantry items default to standard net weight or volume —
+"12 oz", "16 oz", "32 oz", etc.
+
+ORGANIC VS CONVENTIONAL: "Organic Bananas" and "Bananas" are different
+results — when "Organic" (or a store's organic line) is specified, reflect
+that explicitly in exactProductTitle and dietaryTags, and price it at the
+realistic organic premium versus the conventional version. Never collapse
+organic and conventional into the same generic result.
 
 Return ONLY a raw JSON object with this exact structure:
 {
   "originalQuery": "${query}",
-  "brandName": "Extracted brand name, or null if this is a generic/unbranded item (e.g. 'Doritos', or null for 'bananas')",
+  "brandName": "Extracted brand name (including store/private-label brands), or null if this is a generic/unbranded item",
   "correctedFrom": "If you corrected a misspelled brand, put the user's original brand text here, otherwise null",
-  "exactProductTitle": "Best commercial title for image search — for generic items use a plain descriptive title (e.g. 'Bananas, per lb' or 'Tomato Soup, canned')",
+  "exactProductTitle": "Best commercial title for image search — must preserve any dietary/organic qualifier from the query",
   "category": "Produce | Dairy & Eggs | Meat & Seafood | Bakery | Pantry | Frozen | Beverages | Household",
-  "isVague": "boolean — true only if quantity, size, or variety is genuinely missing and needed to price the item; false if you can reasonably assume a standard default (most generic items like 'bananas' or 'milk' should be false with a sensible default size)",
-  "clarifyingQuestion": "If isVague is true, a short clear question in ALL CAPS asking what size/weight/variety they want. If isVague is false, this must be null.",
+  "dietaryTags": ["Array of applicable tags such as 'Organic', 'Gluten-Free', 'Vegan', 'Dairy-Free', 'Keto' — empty array if none apply"],
+  "isVague": "boolean — true if this is a generic/structural query needing a subtype choice (milk, bread, chips, etc.), or if quantity/size is genuinely missing; false if a brand or specific product is already clear",
+  "clarifyingQuestion": "If isVague is true, a short clear question in ALL CAPS asking what type/size/variety they want. If isVague is false, this must be null.",
   "detectedQuantity": "string or null (e.g., '1', '2')",
   "detectedSize": "string or null (e.g., '16 oz', '9.25 oz bag', '1 lb')",
-  "defaultSmallestSize": "string (a sensible standard size/unit — e.g. '1 lb' for bananas, '8 oz' for a can of soup, '16 oz' for a bag of chips)",
-  "suggestedSizes": ["Array of standard size options appropriate to this item — for produce this can be weight options like '1 lb', '2 lb', '5 lb bag'"],
-  "suggestedVarieties": ["Array of common varieties, e.g. 'Nacho Cheese', 'Cool Ranch' for chips, or 'Organic', 'Regular' for produce — empty array if not applicable"],
+  "defaultSmallestSize": "string — a sensible standard size/unit per the UNIT OF MEASURE rule above",
+  "suggestedSizes": ["Array of standard size options appropriate to this item's category"],
+  "suggestedVarieties": ["Array of real varieties/subtypes/flavors relevant to this exact item — for generic items these are the structural subtypes shoppers choose between (see GENERIC/VAGUE rule); empty array only if genuinely not applicable"],
   "estimatedPriceRange": {
     "low": 3.49, "high": 4.99, "defaultSizePrice": 3.99,
     "formattedDisplay": "$3.49 - $4.99 (Est. $3.99 for default size)"
@@ -125,7 +162,7 @@ Return ONLY a raw JSON object with this exact structure:
 
 Rules:
 - FUZZY BRAND MATCHING: If the brand looks misspelled or is a close variant of a real major brand (e.g. "Van Decamp" -> "Van de Kamp's", "Cheeze It" -> "Cheez-It", "Barila" -> "Barilla"), silently correct it to the closest well-known brand and use the corrected brand in brandName and exactProductTitle. Record the user's original text in correctedFrom. Never fail on a misspelling if a plausible major brand exists.
-- BARE BRAND NAME: If the query is only a brand name with no product type given, do NOT ask for clarification and do NOT fail — pick that brand's most iconic/common product yourself and return a complete result for it, exactly as if the user had typed the full product name.
+- BARE BRAND NAME: If the query is only a brand name with no product type given, do NOT ask for clarification and do NOT fail — pick that brand's most iconic/common product yourself (per the CATEGORY FRAMEWORK above) and return a complete result for it, exactly as if the user had typed the full product name.
 - For GENERIC items with no brand, still return a complete, realistic result — never return an error or empty fields just because there's no brand.
 - Always provide a realistic estimatedPriceRange, even for generic produce/pantry items, based on typical US supermarket pricing.
 - Output ONLY raw JSON. No markdown fences, no commentary.
@@ -244,6 +281,15 @@ Rules:
     }
 
     var payload = Object.assign({}, parsed, { imageUrl: imageUrlFromParallelCall });
+
+    // OVERRIDE: if Gemini identified a real brand AND we got a valid image
+    // back from SerpApi, that combination is specific enough on its own —
+    // suppress the yellow "couldn't pin down" clarifying banner even if
+    // Gemini flagged isVague, per the brand-recognition rule.
+    if (payload.brandName && payload.imageUrl) {
+      payload.isVague = false;
+      payload.clarifyingQuestion = null;
+    }
 
     // ---- 4) Save to cache (best-effort) ----
     // Only cache a REAL Gemini result. If Gemini failed and we're serving
