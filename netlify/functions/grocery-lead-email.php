@@ -15,7 +15,7 @@
 
 // IMPORTANT: set this to where you want order/lead notifications sent.
 if (!defined('LLG_ADMIN_NOTIFY_EMAIL')) {
-    define('LLG_ADMIN_NOTIFY_EMAIL', 'orders@locallinkgrocery.com');
+    define('LLG_ADMIN_NOTIFY_EMAIL', 'mamonarehmanm@gmail.com');
 }
 
 add_action('wp_ajax_llg_submit_list', 'llg_handle_submit_list');
