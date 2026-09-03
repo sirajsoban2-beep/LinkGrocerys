@@ -66,17 +66,17 @@ exports.handler = async (event) => {
       try {
         var cached = await store.get(key, { type: 'json' });
         if (cached && cached.cachedAt && (Date.now() - cached.cachedAt) < CACHE_TTL_MS) {
+          var isImageReady = !!cached.payload.imageUrl;
           return {
             statusCode: 200,
             headers,
-            body: JSON.stringify(Object.assign({}, cached.payload, { cached: true }))
+            body: JSON.stringify(Object.assign({}, cached.payload, { cached: true, imagePending: !isImageReady }))
           };
         }
       } catch (e) { /* cache miss or read error — fall through to APIs */ }
     }
 
     const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
-    const serpKey = (process.env.SERPAPI_KEY || '').trim();
 
     if (!geminiKey) {
       return { statusCode: 500, headers, body: JSON.stringify({ error: 'GEMINI_API_KEY is not set in Netlify environment variables' }) };
@@ -216,44 +216,20 @@ Rules:
       }
     }
 
-    // ---- 3) SerpApi thumbnail (non-critical) ----
-    // Fired in PARALLEL with Gemini below (not after it) using the raw
-    // query — this used to wait for Gemini's exactProductTitle first,
-    // which stacked both API calls back to back and was the main cause
-    // of slow/timing-out fresh searches. Running them side by side roughly
-    // halves total wait time. Trade-off: the image search uses the user's
-    // raw text instead of Gemini's cleaned-up title, so a corrected brand
-    // (e.g. "Van Decamp" -> "Van de Kamp's") may occasionally get a
-    // slightly less precise photo — an acceptable trade for reliability.
-    async function fetchImage(rawQuery) {
-      if (!serpKey) return null;
-      try {
-        const searchQuery = encodeURIComponent(rawQuery);
-        const serpRes = await fetchWithTimeout(
-          `https://serpapi.com/search.json?engine=google_shopping&q=${searchQuery}&num=3&gl=us&hl=en&api_key=${serpKey}`,
-          {}, 6000
-        );
-        const serpData = await serpRes.json();
-        if (serpData.shopping_results && serpData.shopping_results.length > 0) {
-          return serpData.shopping_results[0].thumbnail;
-        }
-        if (serpData.error) console.error('SerpApi returned an error:', serpData.error);
-        return null;
-      } catch (serpErr) {
-        console.error('SerpApi Google Shopping Error:', serpErr.name, serpErr.message);
-        return null;
-      }
-    }
+    // ---- 3) Text-first: no image fetching here anymore ----
+    // Image lookup used to run in parallel with Gemini and both had to
+    // finish before the response went out. It's now a SEPARATE endpoint
+    // (grocery-image.js) that the frontend calls right after this text
+    // response lands, so the card (title, price, size/variety chips) can
+    // render in ~1 second with a skeleton placeholder, and the photo pops
+    // in once it's ready instead of holding up everything else.
 
     // Gemini gets a single attempt with a tight timeout — no automatic
     // retry. A retry that repeats the full ~10s call was doubling
     // worst-case latency and was the main reason fresh searches were
     // timing out at ~24s. One fast attempt plus an instant friendly
     // fallback keeps every response well under Netlify's function limit.
-    const [geminiResult, imageUrlFromParallelCall] = await Promise.all([
-      tryGeminiOnce(geminiSystemPrompt, 14000),
-      fetchImage(query)
-    ]);
+    const geminiResult = await tryGeminiOnce(geminiSystemPrompt, 14000);
 
     let parsed = geminiResult;
 
@@ -280,16 +256,7 @@ Rules:
       };
     }
 
-    var payload = Object.assign({}, parsed, { imageUrl: imageUrlFromParallelCall });
-
-    // OVERRIDE: if Gemini identified a real brand AND we got a valid image
-    // back from SerpApi, that combination is specific enough on its own —
-    // suppress the yellow "couldn't pin down" clarifying banner even if
-    // Gemini flagged isVague, per the brand-recognition rule.
-    if (payload.brandName && payload.imageUrl) {
-      payload.isVague = false;
-      payload.clarifyingQuestion = null;
-    }
+    var payload = Object.assign({}, parsed, { imageUrl: null, imagePending: true });
 
     // ---- 4) Save to cache (best-effort) ----
     // Only cache a REAL Gemini result. If Gemini failed and we're serving
