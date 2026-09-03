@@ -131,6 +131,10 @@ DIETARY & LIFESTYLE TAGS: never strip a qualifier like "Gluten-Free" or
 UNIT OF MEASURE: produce uses lb/bunch/head/each; packaged items use oz.
 ORGANIC VS CONVENTIONAL: keep these as distinct results with the organic
 price premium reflected.
+TAXONOMY CONSISTENCY: suggestedVarieties/suggestedSizes must stay within
+the same physical form the query specifies — e.g. "Canned Black Beans"
+must never offer "Dried" as a variety, "Frozen Broccoli" must never offer
+"Fresh".
 BARE BRAND NAME: if a query is only a brand with no product type, pick that
 brand's flagship product yourself — never fail or ask for clarification.
 FUZZY BRAND MATCHING: silently correct misspelled brands to the closest

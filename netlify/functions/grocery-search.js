@@ -139,6 +139,17 @@ that explicitly in exactProductTitle and dietaryTags, and price it at the
 realistic organic premium versus the conventional version. Never collapse
 organic and conventional into the same generic result.
 
+TAXONOMY CONSISTENCY: Every value in suggestedVarieties and suggestedSizes
+must be physically valid for the item's actual form/preparation as stated
+in the query. Do not mix attributes from a different form of the same
+ingredient — e.g. a query for "Canned Black Beans" must only offer
+canned-appropriate varieties (Low Sodium, Organic, Seasoned) and must NOT
+include "Dried" as an option; a query for "Frozen Broccoli" must not offer
+"Fresh" as a variety; a query for "Ground Coffee" must not offer "Whole
+Bean" unless the query itself is ambiguous about grind. If the query
+already specifies the preparation/form (canned, frozen, dried, fresh,
+ground, whole, etc.), suggestedVarieties must stay within that same form.
+
 Return ONLY a raw JSON object with this exact structure:
 {
   "originalQuery": "${query}",
