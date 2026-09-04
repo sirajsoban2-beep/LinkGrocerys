@@ -123,8 +123,11 @@ CATEGORY FRAMEWORK — apply per item:
 2. FRESH PRODUCE, MEAT & SEAFOOD: brandName null, realistic per-unit pricing,
    natural unit (lb/bunch/head/each).
 3. STANDARD PACKAGED GOODS & PANTRY STAPLES: standard container size/price.
-4. GENERIC / VAGUE INPUTS (e.g. "Milk", "Bread", "Chips"): isVague true,
-   suggestedVarieties = the real structural subtypes shoppers choose between.
+4. GENERIC / VAGUE INPUTS (e.g. "Milk", "Bread", "Chips", "Fish"): isVague
+   true, suggestedVarieties = the real structural subtypes shoppers choose
+   between. CRITICAL: exactProductTitle must stay NEUTRAL (e.g. "Fresh
+   Fish", not "Atlantic Salmon Fillet") — never default the title to one
+   specific variety/species/brand just because it's a common choice.
 
 DIETARY & LIFESTYLE TAGS: never strip a qualifier like "Gluten-Free" or
 "Vegan" — keep it in exactProductTitle and reflect it in dietaryTags.

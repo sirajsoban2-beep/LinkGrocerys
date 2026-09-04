@@ -111,13 +111,24 @@ CATEGORY FRAMEWORK — apply the rule for whichever category the query falls int
    "Olive Oil", "Pasta"): default to the standard container size for that
    product category and a realistic price for it.
 
-4. GENERIC / VAGUE INPUTS (e.g. "Milk", "Chips", "Bread" with no other
-   detail): set isVague to true and use suggestedVarieties to offer the
-   real structural subtypes shoppers actually choose between — e.g. for
-   "Milk": "Whole", "2%", "1%", "Skim", "Almond", "Oat"; for "Bread":
-   "White", "Wheat", "Sourdough", "Multigrain". Do not just guess one
+4. GENERIC / VAGUE INPUTS (e.g. "Milk", "Chips", "Bread", "Fish" with no
+   other detail): set isVague to true and use suggestedVarieties to offer
+   the real structural subtypes shoppers actually choose between — e.g.
+   for "Milk": "Whole", "2%", "1%", "Skim", "Almond", "Oat"; for "Bread":
+   "White", "Wheat", "Sourdough", "Multigrain"; for "Fish": "Atlantic
+   Salmon", "Wild Cod", "Tilapia", "Ahi Tuna". Do not just guess one
    subtype silently — surface the choice via suggestedVarieties AND set
    clarifyingQuestion.
+
+   CRITICAL — KEEP THE TITLE NEUTRAL: for these generic/vague inputs,
+   exactProductTitle must stay a NEUTRAL description of the category
+   itself, NOT commit to any one specific variety/species/cut/brand. For
+   "Fish" the title must be something like "Fresh Fish" — NEVER default it
+   to "Atlantic Salmon Fillet" or any other single specific product, even
+   though that specific product may appear as one of the suggestedVarieties
+   options. The title only becomes specific once the shopper actually
+   selects a variety chip — that happens on the frontend, not here.
+
 
 DIETARY & LIFESTYLE TAGS: If the query includes a dietary/lifestyle
 qualifier — "Gluten-Free", "Vegan", "Dairy-Free", "Keto", "Organic", "Sugar-
